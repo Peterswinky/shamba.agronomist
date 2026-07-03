@@ -1,60 +1,54 @@
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
+const request = require('supertest');
+const app = require('../index');
 const prisma = require('../config/prisma');
-const { JWT_SECRET, JWT_EXPIRES_IN } = require('../config/env');
-const { logAction } = require('./history.service');
 
-const SALT_ROUNDS = 12;
+// Requires a running test DATABASE_URL (see .env.test). Run: npm test
 
-function signToken(user) {
-  return jwt.sign(
-    { id: user.id, role: user.role, phone: user.phone },
-    JWT_SECRET,
-    { expiresIn: JWT_EXPIRES_IN }
-  );
-}
+const testPhone = '0712345678';
 
-function sanitize(user) {
-  const { passwordHash, ...safe } = user;
-  return safe;
-}
+afterAll(async () => {
+  await prisma.user.deleteMany({ where: { phone: testPhone } });
+  await prisma.$disconnect();
+});
 
-async function register({ name, phone, email, password, role, location, county }) {
-  const existing = await prisma.user.findUnique({ where: { phone } });
-  if (existing) {
-    const err = new Error('An account with this phone number already exists');
-    err.status = 409;
-    throw err;
-  }
-
-  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
-  const user = await prisma.user.create({
-    data: { name, phone, email, passwordHash, role, location, county },
+describe('Auth flow', () => {
+  it('registers a new farmer', async () => {
+    const res = await request(app).post('/api/auth/register').send({
+      name: 'Test Farmer',
+      phone: testPhone,
+      password: 'securepass123',
+      role: 'FARMER',
+      county: 'Nakuru',
+    });
+    expect(res.status).toBe(201);
+    expect(res.body.token).toBeDefined();
+    expect(res.body.user.passwordHash).toBeUndefined();
   });
 
-  await logAction(user.id, 'REGISTER', { role });
-  const token = signToken(user);
-  return { user: sanitize(user), token };
-}
+  it('rejects duplicate registration', async () => {
+    const res = await request(app).post('/api/auth/register').send({
+      name: 'Test Farmer',
+      phone: testPhone,
+      password: 'securepass123',
+      role: 'FARMER',
+    });
+    expect(res.status).toBe(409);
+  });
 
-async function login({ phone, password }) {
-  const user = await prisma.user.findUnique({ where: { phone } });
-  if (!user) {
-    const err = new Error('Invalid phone number or password');
-    err.status = 401;
-    throw err;
-  }
+  it('logs in with correct credentials', async () => {
+    const res = await request(app).post('/api/auth/login').send({
+      phone: testPhone,
+      password: 'securepass123',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.token).toBeDefined();
+  });
 
-  const valid = await bcrypt.compare(password, user.passwordHash);
-  if (!valid) {
-    const err = new Error('Invalid phone number or password');
-    err.status = 401;
-    throw err;
-  }
-
-  await logAction(user.id, 'LOGIN', {});
-  const token = signToken(user);
-  return { user: sanitize(user), token };
-}
-
-module.exports = { register, login, sanitize };
+  it('rejects login with wrong password', async () => {
+    const res = await request(app).post('/api/auth/login').send({
+      phone: testPhone,
+      password: 'wrongpassword',
+    });
+    expect(res.status).toBe(401);
+  });
+});

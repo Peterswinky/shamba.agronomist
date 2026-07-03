@@ -1,52 +1,67 @@
-const { z } = require('zod');
+const express = require('express');
+const multer = require('multer');
+const path = require('path');
+const crypto = require('crypto');
+const fs = require('fs/promises');
+const prisma = require('../config/prisma');
+const { authenticate } = require('../middleware/auth');
+const { analyzeImage } = require('../services/disease.service');
+const { logAction } = require('../services/history.service');
+const { UPLOAD_DIR } = require('../config/env');
 
-const registerSchema = z.object({
-  name: z.string().min(2).max(100),
-  phone: z
-    .string()
-    .regex(/^(?:\+254|0)[17]\d{8}$/, 'Enter a valid Kenyan phone number, e.g. 0712345678'),
-  email: z.string().email().optional().nullable(),
-  password: z.string().min(6, 'Password must be at least 6 characters'),
-  role: z.enum(['FARMER', 'BUYER']),
-  location: z.string().optional(),
-  county: z.string().optional(),
+const router = express.Router();
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, UPLOAD_DIR),
+  filename: (req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    cb(null, `${crypto.randomUUID()}${ext}`);
+  },
 });
 
-const loginSchema = z.object({
-  phone: z.string().min(6),
-  password: z.string().min(1),
+const upload = multer({
+  storage,
+  limits: { fileSize: 8 * 1024 * 1024 }, // 8MB
+  fileFilter: (req, file, cb) => {
+    const allowed = ['.jpg', '.jpeg', '.png', '.webp'];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (!allowed.includes(ext)) {
+      return cb(new Error('Only JPG, PNG, or WEBP images are allowed'));
+    }
+    cb(null, true);
+  },
 });
 
-const soilCheckSchema = z.object({
-  soilType: z.string(),
-  acreage: z.number().positive().max(10000),
+router.post('/check', authenticate, upload.single('image'), async (req, res, next) => {
+  try {
+    if (!req.file) return res.status(400).json({ error: 'An image file is required' });
+
+    const targetType = req.body.targetType === 'soil' ? 'soil' : 'leaf';
+    const imageUrl = `/uploads/${req.file.filename}`;
+    const imageBuffer = await fs.readFile(req.file.path);
+
+    const { diagnosis, confidence, advice } = await analyzeImage({
+      imageBuffer,
+      targetType,
+    });
+
+    const saved = await prisma.diseaseCheck.create({
+      data: {
+        userId: req.user.id,
+        imageUrl,
+        targetType,
+        diagnosis,
+        confidence,
+        advice,
+      },
+    });
+
+    await logAction(req.user.id, 'DISEASE_CHECK', { diseaseCheckId: saved.id, diagnosis });
+
+    res.json(saved);
+  } catch (err) {
+    next(err);
+  }
 });
 
-const listingSchema = z.object({
-  cropName: z.string().min(2).max(100),
-  quantityKg: z.number().positive(),
-  pricePerKg: z.number().positive(),
-  location: z.string().min(2),
-  county: z.string().min(2),
-  contactPhone: z.string().regex(/^(?:\+254|0)[17]\d{8}$/),
-});
-
-const inquirySchema = z.object({
-  message: z.string().max(500).optional(),
-});
-
-const boostPaymentSchema = z.object({
-  phone: z
-    .string()
-    .regex(/^(?:\+254|0)[17]\d{8}$/, 'Enter a valid Kenyan phone number, e.g. 0712345678')
-    .optional(),
-});
-
-module.exports = {
-  registerSchema,
-  loginSchema,
-  soilCheckSchema,
-  listingSchema,
-  inquirySchema,
-  boostPaymentSchema,
-};
+module.exports = router;

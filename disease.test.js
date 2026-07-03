@@ -1,57 +1,52 @@
-const express = require('express');
-const helmet = require('helmet');
-const cors = require('cors');
-const morgan = require('morgan');
-const rateLimit = require('express-rate-limit');
-const path = require('path');
+const { z } = require('zod');
 
-const env = require('./config/env');
-const errorHandler = require('./middleware/errorHandler');
-
-const authRoutes = require('./routes/auth.routes');
-const soilRoutes = require('./routes/soil.routes');
-const diseaseRoutes = require('./routes/disease.routes');
-const marketplaceRoutes = require('./routes/marketplace.routes');
-const historyRoutes = require('./routes/history.routes');
-const paymentsRoutes = require('./routes/payments.routes');
-const ussdRoutes = require('./routes/ussd.routes');
-
-const app = express();
-
-// --- Security & core middleware ---
-app.use(helmet());
-app.use(cors({ origin: env.CORS_ORIGIN, credentials: true }));
-app.use(express.json({ limit: '2mb' }));
-app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
-
-const limiter = rateLimit({
-  windowMs: env.RATE_LIMIT_WINDOW_MS,
-  max: env.RATE_LIMIT_MAX,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use('/api', limiter);
-
-// Serve uploaded disease-check photos statically (swap for S3/CDN in production)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-
-// --- Health check for load balancers / uptime monitors ---
-app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString() }));
-
-// --- Feature routes ---
-app.use('/api/auth', authRoutes);
-app.use('/api/soil', soilRoutes);
-app.use('/api/disease', diseaseRoutes);
-app.use('/api/marketplace', marketplaceRoutes);
-app.use('/api/history', historyRoutes);
-app.use('/api/payments', paymentsRoutes);
-app.use('/api/ussd', ussdRoutes);
-
-app.use((req, res) => res.status(404).json({ error: 'Route not found' }));
-app.use(errorHandler);
-
-app.listen(env.PORT, () => {
-  console.log(`Shamba API listening on port ${env.PORT} [${env.NODE_ENV}]`);
+const registerSchema = z.object({
+  name: z.string().min(2).max(100),
+  phone: z
+    .string()
+    .regex(/^(?:\+254|0)[17]\d{8}$/, 'Enter a valid Kenyan phone number, e.g. 0712345678'),
+  email: z.string().email().optional().nullable(),
+  password: z.string().min(6, 'Password must be at least 6 characters'),
+  role: z.enum(['FARMER', 'BUYER']),
+  location: z.string().optional(),
+  county: z.string().optional(),
 });
 
-module.exports = app;
+const loginSchema = z.object({
+  phone: z.string().min(6),
+  password: z.string().min(1),
+});
+
+const soilCheckSchema = z.object({
+  soilType: z.string(),
+  acreage: z.number().positive().max(10000),
+});
+
+const listingSchema = z.object({
+  cropName: z.string().min(2).max(100),
+  quantityKg: z.number().positive(),
+  pricePerKg: z.number().positive(),
+  location: z.string().min(2),
+  county: z.string().min(2),
+  contactPhone: z.string().regex(/^(?:\+254|0)[17]\d{8}$/),
+});
+
+const inquirySchema = z.object({
+  message: z.string().max(500).optional(),
+});
+
+const boostPaymentSchema = z.object({
+  phone: z
+    .string()
+    .regex(/^(?:\+254|0)[17]\d{8}$/, 'Enter a valid Kenyan phone number, e.g. 0712345678')
+    .optional(),
+});
+
+module.exports = {
+  registerSchema,
+  loginSchema,
+  soilCheckSchema,
+  listingSchema,
+  inquirySchema,
+  boostPaymentSchema,
+};
