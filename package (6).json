@@ -1,0 +1,126 @@
+const {
+  MPESA_ENV,
+  MPESA_CONSUMER_KEY,
+  MPESA_CONSUMER_SECRET,
+  MPESA_SHORTCODE,
+  MPESA_PASSKEY,
+  MPESA_CALLBACK_URL,
+} = require('../config/env');
+
+// Safaricom Daraja API integration.
+// Docs: https://developer.safaricom.co.ke/APIs/MpesaExpressSimulate
+// Sandbox base URL differs from production — switch via MPESA_ENV.
+const BASE_URL =
+  MPESA_ENV === 'production' ? 'https://api.safaricom.co.ke' : 'https://sandbox.safaricom.co.ke';
+
+let cachedToken = null;
+let cachedTokenExpiry = 0;
+
+// OAuth tokens are valid ~1hr; cache in-memory to avoid a round trip on every request.
+// NOTE: in a multi-instance deployment, prefer caching this in Redis instead of
+// process memory so all instances share one token and don't each mint their own.
+async function getAccessToken() {
+  if (cachedToken && Date.now() < cachedTokenExpiry) {
+    return cachedToken;
+  }
+
+  if (!MPESA_CONSUMER_KEY || !MPESA_CONSUMER_SECRET) {
+    throw new Error('M-Pesa credentials not configured (MPESA_CONSUMER_KEY / MPESA_CONSUMER_SECRET)');
+  }
+
+  const credentials = Buffer.from(`${MPESA_CONSUMER_KEY}:${MPESA_CONSUMER_SECRET}`).toString('base64');
+  const res = await fetch(`${BASE_URL}/oauth/v1/generate?grant_type=client_credentials`, {
+    headers: { Authorization: `Basic ${credentials}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`M-Pesa auth failed (${res.status})`);
+  }
+
+  const data = await res.json();
+  cachedToken = data.access_token;
+  // Refresh a minute early to be safe.
+  cachedTokenExpiry = Date.now() + (Number(data.expires_in || 3599) - 60) * 1000;
+  return cachedToken;
+}
+
+function timestampNow() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, '0');
+  return (
+    d.getFullYear().toString() +
+    pad(d.getMonth() + 1) +
+    pad(d.getDate()) +
+    pad(d.getHours()) +
+    pad(d.getMinutes()) +
+    pad(d.getSeconds())
+  );
+}
+
+// Kenyan phone numbers must be in 2547XXXXXXXX / 2541XXXXXXXX format for Daraja.
+function normalizePhone(phone) {
+  const digits = phone.replace(/\D/g, '');
+  if (digits.startsWith('0')) return `254${digits.slice(1)}`;
+  if (digits.startsWith('254')) return digits;
+  if (digits.startsWith('7') || digits.startsWith('1')) return `254${digits}`;
+  return digits;
+}
+
+/**
+ * Initiates an STK Push (Lipa na M-Pesa Online) — sends a payment prompt
+ * directly to the farmer's phone. Returns Safaricom's CheckoutRequestID,
+ * which the frontend polls or waits on, and which the callback route
+ * matches against to update the Payment record.
+ */
+async function initiateStkPush({ phone, amountKes, accountReference, description }) {
+  if (!MPESA_SHORTCODE || !MPESA_PASSKEY) {
+    throw new Error('M-Pesa shortcode/passkey not configured');
+  }
+  if (!MPESA_CALLBACK_URL) {
+    throw new Error('MPESA_CALLBACK_URL not configured — Safaricom must be able to reach it publicly');
+  }
+
+  const token = await getAccessToken();
+  const timestamp = timestampNow();
+  const password = Buffer.from(`${MPESA_SHORTCODE}${MPESA_PASSKEY}${timestamp}`).toString('base64');
+  const msisdn = normalizePhone(phone);
+
+  const res = await fetch(`${BASE_URL}/mpesa/stkpush/v1/processrequest`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      BusinessShortCode: MPESA_SHORTCODE,
+      Password: password,
+      Timestamp: timestamp,
+      TransactionType: 'CustomerPayBillOnline',
+      Amount: Math.round(amountKes),
+      PartyA: msisdn,
+      PartyB: MPESA_SHORTCODE,
+      PhoneNumber: msisdn,
+      CallBackURL: MPESA_CALLBACK_URL,
+      AccountReference: accountReference.slice(0, 12),
+      TransactionDesc: description.slice(0, 13),
+    }),
+  });
+
+  const data = await res.json();
+  if (!res.ok || data.ResponseCode !== '0') {
+    throw new Error(data.errorMessage || data.ResponseDescription || 'STK push request failed');
+  }
+
+  return {
+    checkoutRequestId: data.CheckoutRequestID,
+    merchantRequestId: data.MerchantRequestID,
+  };
+}
+
+// Test-only helper: clears the in-memory OAuth token cache between test cases.
+function _resetTokenCacheForTests() {
+  cachedToken = null;
+  cachedTokenExpiry = 0;
+}
+
+module.exports = { initiateStkPush, getAccessToken, normalizePhone, _resetTokenCacheForTests };

@@ -1,0 +1,63 @@
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+process.env.MPESA_CONSUMER_KEY = 'key';
+process.env.MPESA_CONSUMER_SECRET = 'secret';
+process.env.MPESA_SHORTCODE = '174379';
+process.env.MPESA_PASSKEY = 'passkey';
+process.env.MPESA_CALLBACK_URL = 'https://example.com/api/payments/mpesa/callback';
+
+const { initiateStkPush, normalizePhone, _resetTokenCacheForTests } = require('../services/mpesa.service');
+
+describe('mpesa.service', () => {
+  beforeEach(() => _resetTokenCacheForTests());
+  afterEach(() => jest.restoreAllMocks());
+
+  it('normalizes Kenyan phone numbers to 2547XXXXXXXX format', () => {
+    expect(normalizePhone('0712345678')).toBe('254712345678');
+    expect(normalizePhone('+254712345678')).toBe('254712345678');
+    expect(normalizePhone('254712345678')).toBe('254712345678');
+  });
+
+  it('initiates an STK push and returns the checkout request id', async () => {
+    global.fetch = jest
+      .fn()
+      // 1st call: OAuth token
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ access_token: 'test-token', expires_in: 3599 }),
+      })
+      // 2nd call: STK push
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          ResponseCode: '0',
+          CheckoutRequestID: 'ws_CO_123',
+          MerchantRequestID: 'mr_456',
+        }),
+      });
+
+    const result = await initiateStkPush({
+      phone: '0712345678',
+      amountKes: 20,
+      accountReference: 'BOOST-abc123',
+      description: 'Listing boost',
+    });
+
+    expect(result.checkoutRequestId).toBe('ws_CO_123');
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('throws a readable error when Safaricom rejects the push', async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ access_token: 'test-token', expires_in: 3599 }) })
+      .mockResolvedValueOnce({
+        ok: false,
+        json: async () => ({ errorMessage: 'Invalid shortcode' }),
+      });
+
+    await expect(
+      initiateStkPush({ phone: '0712345678', amountKes: 20, accountReference: 'X', description: 'Y' })
+    ).rejects.toThrow('Invalid shortcode');
+  });
+});

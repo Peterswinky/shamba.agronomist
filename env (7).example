@@ -1,0 +1,66 @@
+const path = require('path');
+
+// Set env before requiring the module under test, since env.js reads at import time.
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
+process.env.JWT_SECRET = process.env.JWT_SECRET || 'test-secret';
+process.env.DISEASE_MODEL_PROVIDER = 'plantid';
+process.env.PLANT_ID_API_KEY = 'test-key';
+
+const { analyzeImage } = require('../services/disease.service');
+
+describe('disease.service — Plant.id provider', () => {
+  const fakeImage = Buffer.from('fake-image-bytes');
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('maps a disease suggestion into { diagnosis, confidence, advice }', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        result: {
+          is_healthy: { binary: false, probability: 0.12 },
+          disease: {
+            suggestions: [
+              {
+                name: 'Maize Leaf Blight',
+                probability: 0.86,
+                details: {
+                  description: 'A fungal disease affecting maize leaves.',
+                  treatment: { chemical: ['Apply mancozeb-based fungicide'] },
+                },
+              },
+            ],
+          },
+        },
+      }),
+    });
+
+    const result = await analyzeImage({ imageBuffer: fakeImage, targetType: 'leaf' });
+
+    expect(result.diagnosis).toBe('Maize Leaf Blight');
+    expect(result.confidence).toBeCloseTo(0.86);
+    expect(result.advice).toContain('mancozeb');
+  });
+
+  it('reports a healthy leaf when is_healthy.binary is true', async () => {
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        result: { is_healthy: { binary: true, probability: 0.95 }, disease: { suggestions: [] } },
+      }),
+    });
+
+    const result = await analyzeImage({ imageBuffer: fakeImage, targetType: 'leaf' });
+    expect(result.diagnosis).toBe('Healthy Leaf');
+  });
+
+  it('falls back to the mock provider if the Plant.id call fails, without throwing', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('network down'));
+
+    const result = await analyzeImage({ imageBuffer: fakeImage, targetType: 'leaf' });
+    expect(result.diagnosis).toBeTruthy();
+    expect(result.advice).toContain('live analysis was unavailable');
+  });
+});
